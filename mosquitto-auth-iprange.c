@@ -103,29 +103,34 @@ static bool match_ip_prefix(const struct acl_entry *entry,
                             struct sockaddr *sa)
 {
         uint8_t *match_start = NULL;
+        int match_dir = 0;
         if (entry->addr_len == 16) {
                 if (sa->sa_family != AF_INET6) {
                         return false;
                 }
                 match_start =
-                    (uint8_t *) (((struct sockaddr_in6 *) sa)->sin6_addr.
-                                 s6_addr);
+                    (uint8_t *) (((struct sockaddr_in6 *) sa)->
+                                 sin6_addr.s6_addr);
+                match_dir = 1;
         } else if (entry->addr_len == 4) {
                 if (sa->sa_family != AF_INET) {
                         return false;
                 }
                 match_start =
-                    (uint8_t *) & (((struct sockaddr_in *) sa)->sin_addr.
-                                   s_addr);
+                    (uint8_t *) & (((struct sockaddr_in *) sa)->
+                                   sin_addr.s_addr) + 4;
+                match_dir = -1;
         } else {
                 return false;
         }
 
-        // Start at the last byte, matching max 8 bits at once
+        // Matching max 8 bits at once
+        //  IPv4: Start at last byte
+        //  IPv6: Start at first byte
         int match_left = entry->prefix_len;
-        int match_pos = entry->addr_len - 1;
+        int match_pos = 0;
 
-        while (match_left && match_pos >= 0) {
+        while (match_left && match_pos < entry->addr_len) {
                 int match_bits = match_left;
                 if (match_bits > 8) {
                         match_bits = 8;
@@ -133,12 +138,13 @@ static bool match_ip_prefix(const struct acl_entry *entry,
                 match_left -= match_bits;
                 // mask keeps the highest match_bits bits
                 uint8_t mask = ~(0xff >> match_bits);
-                if ((entry->addr[match_pos] & mask) !=
-                    (match_start[match_pos] & mask)) {
+
+                if ((entry->addr[match_dir * match_pos] & mask) !=
+                    (match_start[match_dir * match_pos] & mask)) {
                         return false;
                 }
 
-                match_pos--;
+                match_pos++;
         }
 
         // "No mismatch so far" means match
