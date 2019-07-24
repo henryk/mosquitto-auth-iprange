@@ -15,7 +15,7 @@ DESTDIR?=
 
 CFLAGS_LIB=-fPIC -shared
 LIBS=-lmosquitto
-CFLAGS=-I/usr/include -ggdb --std=gnu99 -Wall -pedantic -fstack-protector -Werror=implicit-function-declaration
+CFLAGS=-I/usr/include -ggdb --std=gnu99 -Wall -pedantic -fstack-protector -Werror=implicit-function-declaration -D_GNU_SOURCE
 CC=gcc
 
 mosquitto-auth-iprange.so: mosquitto-auth-iprange.c

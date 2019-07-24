@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <stdio.h>
 
 #include <mosquitto.h>
 #include <mosquitto_plugin.h>
@@ -21,6 +22,7 @@ struct acl_entry {
         uint8_t addr[16];
         size_t addr_len;
         unsigned int prefix_len;
+        bool topic_formatted;
         char *topic;
         struct acl_rule {
                 uint8_t allow;
@@ -32,7 +34,7 @@ struct acl_entry {
 #define OPTION_WHITESPACE " \t"
 #define ACL_RULE_IGNORE (struct acl_rule){ ACL_MASK_NONE, ACL_MASK_NONE }
 
-struct acl_entry *acl_head = NULL;
+static struct acl_entry *acl_head = NULL;
 
 #if MOSQ_AUTH_PLUGIN_VERSION < 3
 #error "MOSQ_AUTH_PLUGIN_VERSION must be at least 3"
@@ -108,15 +110,15 @@ static bool match_ip_prefix(const struct acl_entry *entry,
                         return false;
                 }
                 match_start =
-                    (uint8_t *) (((struct sockaddr_in6 *) sa)->sin6_addr.
-                                 s6_addr);
+                    (uint8_t *) (((struct sockaddr_in6 *) sa)->
+                                 sin6_addr.s6_addr);
         } else if (entry->addr_len == 4) {
                 if (sa->sa_family != AF_INET) {
                         return false;
                 }
                 match_start =
-                    (uint8_t *) & (((struct sockaddr_in *) sa)->sin_addr.
-                                   s_addr);
+                    (uint8_t *) & (((struct sockaddr_in *) sa)->
+                                   sin_addr.s_addr);
         } else {
                 return false;
         }
@@ -148,6 +150,63 @@ static bool match_ip_prefix(const struct acl_entry *entry,
         return true;
 }
 
+static bool match_topic_plain(const char *pattern, const char *topic)
+{
+        // Try exact match first
+        if (strcmp(pattern, topic) == 0) {
+                // Check for exact match
+                return true;
+        }
+
+        bool r = false;
+        if (mosquitto_topic_matches_sub(pattern, topic, &r) !=
+            MOSQ_ERR_SUCCESS) {
+                /* FIXME We should find a better way to match subscriptions with wildcards */
+                mosquitto_log_printf(MOSQ_LOG_INFO,
+                                     "iprange: evaluate_acl failure in mosquitto_topic_matches_sub (%s vs. %s)",
+                                     pattern, topic);
+                r = false;
+        }
+
+        return r;
+}
+
+static bool match_topic_formatted(const char *pattern, const char *topic,
+                                  const struct addrinfo *a)
+{
+        char *formatted_topic = NULL;
+        if (a->ai_family == AF_INET) {
+                struct sockaddr_in *sin =
+                    (struct sockaddr_in *) a->ai_addr;
+                uint8_t *ip = (uint8_t *) & (sin->sin_addr.s_addr);
+                if (asprintf(&formatted_topic, pattern,
+                             ip[0], ip[1], ip[2], ip[3],
+                             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) < 0) {
+                        mosquitto_log_printf(MOSQ_LOG_ERR,
+                                             "asprintf failure");
+                        return false;
+                }
+        } else if (a->ai_family == AF_INET6) {
+                struct sockaddr_in6 *sin6 =
+                    (struct sockaddr_in6 *) a->ai_addr;
+                uint8_t *ip = (uint8_t *) (sin6->sin6_addr.s6_addr);
+                if (asprintf(&formatted_topic, pattern,
+                             ip[0], ip[1], ip[2], ip[3],
+                             ip[4], ip[5], ip[6], ip[7],
+                             ip[8], ip[9], ip[10], ip[11],
+                             ip[12], ip[13], ip[14], ip[15]) < 0) {
+                        mosquitto_log_printf(MOSQ_LOG_ERR,
+                                             "asprintf failure");
+                        return false;
+                }
+        } else
+                return false;
+
+        bool r = match_topic_plain(formatted_topic, topic);
+        free(formatted_topic);
+        return r;
+}
+
 static struct acl_rule evaluate_acl(const char *const ip,
                                     const char *const topic)
 {
@@ -173,10 +232,16 @@ static struct acl_rule evaluate_acl(const char *const ip,
                 // Match IP address against getaddrinfo() results, skip if no match
                 struct addrinfo *a = addr;
                 bool matched_any = false;
-                while (a) {
+                while (a && !matched_any) {
                         if (match_ip_prefix(current, a->ai_addr)) {
                                 matched_any = true;
-                                break;
+                        }
+                        if (matched_any && current->topic_formatted) {
+                                // If the topic is formatted, we need to check once
+                                //  per getaddrinfo() result
+                                matched_any &=
+                                    match_topic_formatted(current->topic,
+                                                          topic, a);
                         }
                         a = a->ai_next;
                 }
@@ -184,27 +249,12 @@ static struct acl_rule evaluate_acl(const char *const ip,
                 if (!matched_any) {
                         goto next_loop;
                 }
-                // Match topic, skip if no match
-                bool r = false;
-                // Try exact match first
-                if (strcmp(current->topic, topic) == 0) {
-                        // Fall back to check for exact match
-                        r = true;
-                }
 
-                if (!r) {
-                        if (mosquitto_topic_matches_sub
-                            (current->topic, topic, &r)
-                            /* FIXME We should find a better way to match subscriptions with wildcards */
-                            != MOSQ_ERR_SUCCESS) {
-                                mosquitto_log_printf(MOSQ_LOG_INFO,
-                                                     "iprange: evaluate_acl failure in mosquitto_topic_matches_sub");
-                                r = false;
+                if (!current->topic_formatted) {
+                        // Perform a plain topic check
+                        if (match_topic_plain(current->topic, topic)) {
+                                goto next_loop;
                         }
-                }
-
-                if (!r) {
-                        goto next_loop;
                 }
                 // Apply rule
                 result.allow |= current->rule.allow;
@@ -222,7 +272,7 @@ static struct acl_rule evaluate_acl(const char *const ip,
 
 static int add_acl_entry(char *optstr)
 {
-        /* parse optstr as   <allow|deny|[+|-][r][w][s]...> <ip>[/<prefix_length>] <topic>
+        /* parse optstr as   <allow|deny|[+|-][r][w][s]...> <ip>[/<prefix_length>] <topic|% topic_format>
          * and append (possibly multiple) struct acl_entry * to the end of the
          * list in acl_head
          */
@@ -273,12 +323,22 @@ static int add_acl_entry(char *optstr)
         if ((gai_err = getaddrinfo(ip, NULL, &hints, &addr)) != 0) {
                 err_reason = gai_strerror(gai_err);
                 goto abort;
+
         }
         // Extract topic
         char *topic = strtok_r(NULL, OPTION_WHITESPACE, &saveptr_opt);
+        bool topic_formatted = false;
         if (!topic) {
                 err_reason = "no topic found";
                 goto abort;
+        }
+        if (strcmp(topic, "%") == 0) {
+                topic_formatted = true;
+                topic = strtok_r(NULL, OPTION_WHITESPACE, &saveptr_opt);
+                if (!topic) {
+                        err_reason = "no topic_format found";
+                        goto abort;
+                }
         }
 
         char addrstr[INET6_ADDRSTRLEN];
@@ -296,6 +356,7 @@ static int add_acl_entry(char *optstr)
                 }
                 pending_entry->rule = rule;
                 pending_entry->topic = strdup(topic);
+                pending_entry->topic_formatted = topic_formatted;
 
                 // Copy raw IP address bytes (in network byte order)
                 if (addr_ptr->ai_family == AF_INET) {
