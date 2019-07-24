@@ -103,23 +103,20 @@ static bool match_ip_prefix(const struct acl_entry *entry,
                             struct sockaddr *sa)
 {
         uint8_t *match_start = NULL;
-        int match_dir = 0;
         if (entry->addr_len == 16) {
                 if (sa->sa_family != AF_INET6) {
                         return false;
                 }
                 match_start =
-                    (uint8_t *) (((struct sockaddr_in6 *) sa)->
-                                 sin6_addr.s6_addr);
-                match_dir = 1;
+                    (uint8_t *) (((struct sockaddr_in6 *) sa)->sin6_addr.
+                                 s6_addr);
         } else if (entry->addr_len == 4) {
                 if (sa->sa_family != AF_INET) {
                         return false;
                 }
                 match_start =
-                    (uint8_t *) & (((struct sockaddr_in *) sa)->
-                                   sin_addr.s_addr) + 4;
-                match_dir = -1;
+                    (uint8_t *) & (((struct sockaddr_in *) sa)->sin_addr.
+                                   s_addr);
         } else {
                 return false;
         }
@@ -139,8 +136,8 @@ static bool match_ip_prefix(const struct acl_entry *entry,
                 // mask keeps the highest match_bits bits
                 uint8_t mask = ~(0xff >> match_bits);
 
-                if ((entry->addr[match_dir * match_pos] & mask) !=
-                    (match_start[match_dir * match_pos] & mask)) {
+                if ((entry->addr[match_pos] & mask) !=
+                    (match_start[match_pos] & mask)) {
                         return false;
                 }
 
@@ -188,13 +185,22 @@ static struct acl_rule evaluate_acl(const char *const ip,
                         goto next_loop;
                 }
                 // Match topic, skip if no match
-                bool r;
-                if (mosquitto_topic_matches_sub(current->topic, topic, &r)
-                    != MOSQ_ERR_SUCCESS) {
-                        mosquitto_log_printf(MOSQ_LOG_ERR,
-                                             "iprange: evaluate_acl failure in mosquitto_topic_matches_sub");
-                        freeaddrinfo(addr);
-                        return ACL_RULE_IGNORE;
+                bool r = false;
+                // Try exact match first
+                if (strcmp(current->topic, topic) == 0) {
+                        // Fall back to check for exact match
+                        r = true;
+                }
+
+                if (!r) {
+                        if (mosquitto_topic_matches_sub
+                            (current->topic, topic, &r)
+                            /* FIXME We should find a better way to match subscriptions with wildcards */
+                            != MOSQ_ERR_SUCCESS) {
+                                mosquitto_log_printf(MOSQ_LOG_INFO,
+                                                     "iprange: evaluate_acl failure in mosquitto_topic_matches_sub");
+                                r = false;
+                        }
                 }
 
                 if (!r) {
