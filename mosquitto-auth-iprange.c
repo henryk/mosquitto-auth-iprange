@@ -252,7 +252,7 @@ static struct acl_rule evaluate_acl(const char *const ip,
 
                 if (!current->topic_formatted) {
                         // Perform a plain topic check
-                        if (match_topic_plain(current->topic, topic)) {
+                        if (!match_topic_plain(current->topic, topic)) {
                                 goto next_loop;
                         }
                 }
