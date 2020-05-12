@@ -222,7 +222,9 @@ static struct acl_rule evaluate_acl(const char *const ip,
         };
         if ((gai_err = getaddrinfo(ip, NULL, &hints, &addr)) != 0) {
                 mosquitto_log_printf(MOSQ_LOG_ERR,
-                                     "iprange: evaluate_acl failure: %s",
+                                     "iprange: evaluate_acl failure on %s for %s: %s",
+                                     ip,
+                                     topic,
                                      gai_strerror(gai_err));
                 return ACL_RULE_IGNORE;
         }
